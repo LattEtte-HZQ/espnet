@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import sys
 from typing import Callable, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -19,7 +20,8 @@ from espnet2.asr_transducer.decoder.rnn_decoder import RNNDecoder
 from espnet2.asr_transducer.decoder.rwkv_decoder import RWKVDecoder
 from espnet2.asr_transducer.decoder.stateless_decoder import StatelessDecoder
 from espnet2.asr_transducer.encoder.encoder import Encoder
-from espnet2.asr_transducer.espnet_transducer_model import ESPnetASRTransducerModel
+from espnet2.asr_transducer.espnet_transducer_mtp_model import ESPnetASRTransducerMTPModel
+from espnet2.asr_transducer.joint_network_mtp import JointNetworkMTP
 from espnet2.asr_transducer.joint_network import JointNetwork
 from espnet2.layers.abs_normalize import AbsNormalize
 from espnet2.layers.global_mvn import GlobalMVN
@@ -75,7 +77,7 @@ decoder_choices = ClassChoices(
 )
 
 
-class ASRTransducerTask(AbsTask):
+class ASRTransducerMTPTask(AbsTask):
     """ASR Transducer Task definition."""
 
     num_optimizers: int = 1
@@ -124,7 +126,7 @@ class ASRTransducerTask(AbsTask):
         group.add_argument(
             "--model_conf",
             action=NestedDictAction,
-            default=get_default_kwargs(ESPnetASRTransducerModel),
+            default=get_default_kwargs(ESPnetASRTransducerMTPModel),
             help="The keyword arguments for the model class.",
         )
         group.add_argument(
@@ -216,6 +218,12 @@ class ASRTransducerTask(AbsTask):
             default="13_15",
             help="The range of the noise decibel level.",
         )
+        group.add_argument(
+            "--pred_num",
+            type=int,
+            default=2,
+            help="Length of predicted tokens.",
+        )
 
         for class_choices in cls.class_choices_list:
             # Append --<name> and --<name>_conf.
@@ -245,7 +253,7 @@ class ASRTransducerTask(AbsTask):
     @classmethod
     @typechecked
     def build_preprocess_fn(
-            cls, args: argparse.Namespace, train: bool
+        cls, args: argparse.Namespace, train: bool
     ) -> Optional[Callable[[str, Dict[str, np.array]], Dict[str, np.ndarray]]]:
         """Build pre-processing function.
 
@@ -290,7 +298,7 @@ class ASRTransducerTask(AbsTask):
 
     @classmethod
     def required_data_names(
-            cls, train: bool = True, inference: bool = False
+        cls, train: bool = True, inference: bool = False
     ) -> Tuple[str, ...]:
         """Required data depending on task mode.
 
@@ -312,7 +320,7 @@ class ASRTransducerTask(AbsTask):
 
     @classmethod
     def optional_data_names(
-            cls, train: bool = True, inference: bool = False
+        cls, train: bool = True, inference: bool = False
     ) -> Tuple[str, ...]:
         """Optional data depending on task mode.
 
@@ -331,7 +339,7 @@ class ASRTransducerTask(AbsTask):
 
     @classmethod
     @typechecked
-    def build_model(cls, args: argparse.Namespace) -> ESPnetASRTransducerModel:
+    def build_model(cls, args: argparse.Namespace) -> ESPnetASRTransducerMTPModel:
         """Required data depending on task mode.
 
         Args:
@@ -360,7 +368,7 @@ class ASRTransducerTask(AbsTask):
                 "warmup_steps", 25000
             )
 
-        logging.info(f"Vocabulary size: {vocab_size}")
+        logging.info(f"Vocabulary size: {vocab_size }")
 
         # 1. frontend
         if args.input_size is None:
@@ -400,16 +408,18 @@ class ASRTransducerTask(AbsTask):
         )
         decoder_output_size = decoder.output_size
 
-        # 6. Joint Network
-        joint_network = JointNetwork(
-            output_size=vocab_size,
-            encoder_size=encoder_output_size,
-            decoder_size=decoder_output_size,
+        # 6. Multi token predictor Joint Networks
+        pred_num = args.pred_num
+        joint_network_mtp = JointNetworkMTP(
+            vocab_size,
+            encoder_output_size,
+            decoder_output_size,
+            pred_num,
             **args.joint_network_conf,
         )
 
         # 7. Build model
-        model = ESPnetASRTransducerModel(
+        model = ESPnetASRTransducerMTPModel(
             vocab_size=vocab_size,
             token_list=token_list,
             frontend=frontend,
@@ -417,7 +427,9 @@ class ASRTransducerTask(AbsTask):
             normalize=normalize,
             encoder=encoder,
             decoder=decoder,
-            joint_network=joint_network,
+            joint_network_mtp=joint_network_mtp,
+            # joint_network=joint_network,
+            pred_num=pred_num,
             **args.model_conf,
         )
 

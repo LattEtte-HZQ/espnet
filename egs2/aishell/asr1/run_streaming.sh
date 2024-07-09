@@ -9,8 +9,8 @@ train_set=train
 valid_set=dev
 test_sets="dev test"
 
-asr_config=conf/train_asr_streaming_transformer.yaml
-inference_config=conf/decode_asr_streaming.yaml
+asr_config=conf/train_asr_streaming_RNNT.yaml
+inference_config=conf/decode_asr_streaming_RNNT.yaml
 
 lm_config=conf/train_lm.yaml
 use_lm=true
@@ -20,12 +20,12 @@ use_wordlm=false
 # (train_set will be "${train_set}_sp" if speed_perturb_factors is specified)
 speed_perturb_factors="0.9 1.0 1.1"
 
-./asr.sh                                               \
+./streaming_asr.sh                                               \
     --use_streaming true                               \
     --lang zh                                          \
     --audio_format wav                                 \
     --feats_type raw                                   \
-    --token_type char                                  \
+    --token_type phn                                  \
     --use_lm ${use_lm}                                 \
     --use_word_lm ${use_wordlm}                        \
     --lm_config "${lm_config}"                         \

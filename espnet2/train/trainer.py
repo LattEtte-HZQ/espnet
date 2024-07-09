@@ -38,7 +38,7 @@ from espnet2.utils.kwargs2args import kwargs2args
 
 if torch.distributed.is_available():
     from torch.distributed import ReduceOp
-
+logging.getLogger().setLevel(logging.INFO)
 autocast_args = dict()
 if V(torch.__version__) >= V("1.6.0"):
     from torch.cuda.amp import GradScaler, autocast

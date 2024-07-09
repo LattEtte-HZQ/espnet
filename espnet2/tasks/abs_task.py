@@ -1,6 +1,7 @@
 """Abstract task module."""
 
 import argparse
+import collections
 import functools
 import logging
 import os
@@ -850,18 +851,6 @@ class AbsTask(ABC):
             help="Default sampling rate used for the chunk length. Will be used to "
             "adaptively adjust the chunk length for data of different sampling rates. "
             "(If None, the chunk length will be fixed.)",
-        )
-        group.add_argument(
-            "--chunk_max_abs_length",
-            type=int_or_none,
-            default=None,
-            help="Maximum number of samples per chunk for all sampling rates",
-        )
-        group.add_argument(
-            "--chunk_discard_short_samples",
-            type=str2bool,
-            default=True,
-            help="Discard samples shorter than the minimum chunk length",
         )
 
         group = parser.add_argument_group("Dataset related")
@@ -1898,8 +1887,6 @@ class AbsTask(ABC):
             num_cache_chunks=num_cache_chunks,
             excluded_key_prefixes=args.chunk_excluded_key_prefixes,
             default_fs=args.chunk_default_fs,
-            chunk_max_abs_length=args.chunk_max_abs_length,
-            discard_short_samples=args.chunk_discard_short_samples,
         )
 
     # NOTE(kamo): Not abstract class
@@ -2077,6 +2064,7 @@ class AbsTask(ABC):
         config_file: Optional[Union[Path, str]] = None,
         model_file: Optional[Union[Path, str]] = None,
         device: str = "cpu",
+        ngpu: int = 0,
     ) -> Tuple[AbsESPnetModel, argparse.Namespace]:
         """Build model from the files.
 
@@ -2107,6 +2095,9 @@ class AbsTask(ABC):
                 f"model must inherit {AbsESPnetModel.__name__}, but got {type(model)}"
             )
         model.to(device)
+        # # 20240703 HZQ Multi GPUs Inference
+        # if ngpu > 1:
+        #     model = torch.nn.DataParallel(model)
 
         # For finetuned model, create adapter
         use_adapter = getattr(args, "use_adapter", False)
@@ -2119,9 +2110,14 @@ class AbsTask(ABC):
                 #   in PyTorch<=1.4
                 device = f"cuda:{torch.cuda.current_device()}"
             try:
+                # 20240703 HZQ Multi GPUs Inference
+                state_dict = torch.load(model_file, map_location=device)
+                strict = not use_adapter
+                # if ngpu > 1:
+                #     strict = False
                 model.load_state_dict(
-                    torch.load(model_file, map_location=device),
-                    strict=not use_adapter,
+                    state_dict,
+                    strict=strict,
                 )
             except RuntimeError:
                 # Note(simpleoier): the following part is to be compatible with

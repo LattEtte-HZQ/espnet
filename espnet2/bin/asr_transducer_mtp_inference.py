@@ -23,7 +23,7 @@ from espnet2.asr_transducer.beam_search_transducer import (
 from espnet2.asr_transducer.frontend.online_audio_processor import OnlineAudioProcessor
 from espnet2.asr_transducer.utils import TooShortUttError
 from espnet2.fileio.datadir_writer import DatadirWriter
-from espnet2.tasks.asr_transducer import ASRTransducerTask
+from espnet2.tasks.asr_transducer_mtp import ASRTransducerMTPTask
 from espnet2.tasks.lm import LMTask
 from espnet2.text.build_tokenizer import build_tokenizer
 from espnet2.text.token_id_converter import TokenIDConverter
@@ -70,6 +70,7 @@ class Speech2Text:
         token_type: Optional[str] = None,
         bpemodel: Optional[str] = None,
         device: str = "cpu",
+        ngpu: int  = 0,
         beam_size: int = 5,
         dtype: str = "float32",
         lm_weight: float = 1.0,
@@ -84,8 +85,8 @@ class Speech2Text:
         """Construct a Speech2Text object."""
         super().__init__()
 
-        asr_model, asr_train_args = ASRTransducerTask.build_model_from_file(
-            asr_train_config, asr_model_file, device
+        asr_model, asr_train_args = ASRTransducerMTPTask.build_model_from_file(
+            asr_train_config, asr_model_file, device, ngpu
         )
 
         if quantize_asr_model:
@@ -143,7 +144,7 @@ class Speech2Text:
 
         beam_search = BeamSearchTransducer(
             asr_model.decoder,
-            asr_model.joint_network,
+            asr_model.joint_network_mtp.multi_token_predictor[1],
             beam_size,
             lm=lm_scorer,
             lm_weight=lm_weight,
@@ -403,8 +404,8 @@ def inference(
 
     if batch_size > 1:
         raise NotImplementedError("batch decoding is not implemented")
-    if ngpu > 1:
-        raise NotImplementedError("only single GPU decoding is supported")
+    # if ngpu > 1:
+    #     raise NotImplementedError("only single GPU decoding is supported")
 
     logging.basicConfig(
         level=log_level,
@@ -412,7 +413,7 @@ def inference(
     )
 
     if ngpu >= 1:
-        device = "cuda:0"
+        device = "cuda"
     else:
         device = "cpu"
 
@@ -429,6 +430,7 @@ def inference(
         token_type=token_type,
         bpemodel=bpemodel,
         device=device,
+        ngpu=ngpu,
         dtype=dtype,
         beam_size=beam_size,
         lm_weight=lm_weight,
@@ -449,16 +451,16 @@ def inference(
         decoding_samples = speech2text.audio_processor.decoding_samples
 
     # 3. Build data-iterator
-    loader = ASRTransducerTask.build_streaming_iterator(
+    loader = ASRTransducerMTPTask.build_streaming_iterator(
         data_path_and_name_and_type,
         dtype=dtype,
         batch_size=batch_size,
         key_file=key_file,
         num_workers=num_workers,
-        preprocess_fn=ASRTransducerTask.build_preprocess_fn(
+        preprocess_fn=ASRTransducerMTPTask.build_preprocess_fn(
             speech2text.asr_train_args, False
         ),
-        collate_fn=ASRTransducerTask.build_collate_fn(
+        collate_fn=ASRTransducerMTPTask.build_collate_fn(
             speech2text.asr_train_args, False
         ),
         allow_variable_data_keys=allow_variable_data_keys,
@@ -501,7 +503,7 @@ def inference(
                             # if display_hypotheses:
                             #     _result = speech2text.hypotheses_to_results(part_hyps)
                             #     _length = (i + 1) * decoding_window
-
+                            #
                             #     logging.info(
                             #         f"Current best hypothesis (0-{_length}ms): "
                             #         f"{keys}: {_result[0][0]}"
