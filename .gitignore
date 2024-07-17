@@ -55,6 +55,7 @@ egs*/fisher_callhome_spanish/*/local/mapping*
 egs2/test/*
 
 # tools related
+tools/
 tools/chainer
 tools/bin
 tools/include
@@ -102,3 +103,6 @@ tools/ffmpeg-*-static
 tools/ffmpeg-release
 tools/ffmpeg-release-*.tar.xz
 tools/Miniconda3-latest-*.sh
+tools/boost_1_81_0_build/
+tools/boost_1_81_0/
+tools/kenlm/

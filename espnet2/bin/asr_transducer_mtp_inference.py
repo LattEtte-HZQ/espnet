@@ -23,7 +23,7 @@ from espnet2.asr_transducer.beam_search_transducer import (
 from espnet2.asr_transducer.frontend.online_audio_processor import OnlineAudioProcessor
 from espnet2.asr_transducer.utils import TooShortUttError
 from espnet2.fileio.datadir_writer import DatadirWriter
-from espnet2.tasks.asr_transducer import ASRTransducerTask
+from espnet2.tasks.asr_transducer_mtp import ASRTransducerMTPTask
 from espnet2.tasks.lm import LMTask
 from espnet2.text.build_tokenizer import build_tokenizer
 from espnet2.text.token_id_converter import TokenIDConverter
@@ -61,31 +61,33 @@ class Speech2Text:
 
     @typechecked
     def __init__(
-        self,
-        asr_train_config: Union[Path, str, None] = None,
-        asr_model_file: Union[Path, str, None] = None,
-        beam_search_config: Optional[Dict[str, Any]] = None,
-        lm_train_config: Union[Path, str, None] = None,
-        lm_file: Union[Path, str, None] = None,
-        token_type: Optional[str] = None,
-        bpemodel: Optional[str] = None,
-        device: str = "cpu",
-        beam_size: int = 5,
-        dtype: str = "float32",
-        lm_weight: float = 1.0,
-        quantize_asr_model: bool = False,
-        quantize_modules: Optional[List[str]] = None,
-        quantize_dtype: str = "qint8",
-        nbest: int = 1,
-        streaming: bool = False,
-        decoding_window: int = 640,
-        left_context: int = 32,
+            self,
+            asr_train_config: Union[Path, str, None] = None,
+            asr_model_file: Union[Path, str, None] = None,
+            beam_search_config: Optional[Dict[str, Any]] = None,
+            lm_train_config: Union[Path, str, None] = None,
+            lm_file: Union[Path, str, None] = None,
+            token_type: Optional[str] = None,
+            bpemodel: Optional[str] = None,
+            device: str = "cpu",
+            ngpu: int = 0,
+            beam_size: int = 5,
+            dtype: str = "float32",
+            lm_weight: float = 1.0,
+            quantize_asr_model: bool = False,
+            quantize_modules: Optional[List[str]] = None,
+            quantize_dtype: str = "qint8",
+            nbest: int = 1,
+            streaming: bool = False,
+            decoding_window: int = 640,
+            left_context: int = 32,
+            pred_num: int = 2
     ) -> None:
         """Construct a Speech2Text object."""
         super().__init__()
 
-        asr_model, asr_train_args = ASRTransducerTask.build_model_from_file(
-            asr_train_config, asr_model_file, device
+        asr_model, asr_train_args = ASRTransducerMTPTask.build_model_from_file(
+            asr_train_config, asr_model_file, device, ngpu
         )
 
         if quantize_asr_model:
@@ -114,7 +116,7 @@ class Speech2Text:
             asr_model.to(dtype=getattr(torch, dtype)).eval()
 
         if hasattr(asr_model.decoder, "rescale_every") and (
-            asr_model.decoder.rescale_every > 0
+                asr_model.decoder.rescale_every > 0
         ):
             rescale_every = asr_model.decoder.rescale_every
 
@@ -141,15 +143,19 @@ class Speech2Text:
         if beam_search_config is None:
             beam_search_config = {}
 
-        beam_search = BeamSearchTransducer(
-            asr_model.decoder,
-            asr_model.joint_network,
-            beam_size,
-            lm=lm_scorer,
-            lm_weight=lm_weight,
-            nbest=nbest,
-            **beam_search_config,
-        )
+        beam_searchs = []
+        for i in range(pred_num):
+            beam_searchs.append(
+                BeamSearchTransducer(
+                    asr_model.decoder,
+                    asr_model.joint_network_mtp.multi_token_predictor[i],
+                    beam_size,
+                    lm=lm_scorer,
+                    lm_weight=lm_weight,
+                    nbest=nbest,
+                    **beam_search_config,
+                )
+            )
 
         token_list = asr_model.token_list
 
@@ -177,7 +183,8 @@ class Speech2Text:
         self.converter = converter
         self.tokenizer = tokenizer
 
-        self.beam_search = beam_search
+        self.pred_num = pred_num
+        self.beam_searchs = beam_searchs
 
         self.streaming = streaming and decoding_window >= 0
         self.asr_model.encoder.dynamic_chunk_training = False
@@ -199,17 +206,18 @@ class Speech2Text:
         """Reset Speech2Text parameters."""
 
         self.asr_model.encoder.reset_cache(self.left_context, device=self.device)
-        self.beam_search.reset_cache()
+        for beam_search in self.beam_searchs:
+            beam_search.reset_cache()
         self.audio_processor.reset_cache()
 
         self.num_processed_frames = torch.tensor([[0]], device=self.device)
 
     @torch.no_grad()
     def streaming_decode(
-        self,
-        speech: Union[torch.Tensor, np.ndarray],
-        is_final: bool = False,
-    ) -> List[Hypothesis]:
+            self,
+            speech: Union[torch.Tensor, np.ndarray],
+            is_final: bool = False,
+    ) -> List[Any]:
         """Speech2Text streaming call.
 
         Args:
@@ -239,16 +247,18 @@ class Speech2Text:
         )
         self.num_processed_frames += enc_out.size(1)
 
-        nbest_hyps = self.beam_search(enc_out[0], is_final=is_final)
+        nbest_hypss = []
+        for i in range(self.pred_num):
+            nbest_hypss.append(self.beam_searchs[i](enc_out[0], is_final=is_final))
 
         if is_final:
             self.reset_streaming_cache()
 
-        return nbest_hyps
+        return nbest_hypss
 
     @torch.no_grad()
     @typechecked
-    def __call__(self, speech: Union[torch.Tensor, np.ndarray]) -> List[Hypothesis]:
+    def __call__(self, speech: Union[torch.Tensor, np.ndarray]) -> List[Any]:
         """Speech2Text call.
 
         Args:
@@ -276,11 +286,14 @@ class Speech2Text:
 
         enc_out, _ = self.asr_model.encoder(feats, feats_length)
 
-        nbest_hyps = self.beam_search(enc_out[0])
+        nbest_hypss = []
+        for i in range(self.pred_num):
+            nbest_hypss.append(self.beam_searchs[i](enc_out[0]))
+        # nbest_hyps = self.beam_search(enc_out[0])
 
-        return nbest_hyps
+        return nbest_hypss
 
-    def hypotheses_to_results(self, nbest_hyps: List[Hypothesis]) -> List[Any]:
+    def hypotheses_to_results(self, nbest_hyps: List[Any]) -> List[Any]:
         """Build partial or final results from the hypotheses.
 
         Args:
@@ -292,23 +305,26 @@ class Speech2Text:
         """
         results = []
 
-        for hyp in nbest_hyps:
-            token_int = list(filter(lambda x: x != 0, hyp.yseq))
+        for i in range(self.pred_num):
+            result = []
+            for hyp in nbest_hyps[i]:
+                token_int = list(filter(lambda x: x != 0, hyp.yseq))
 
-            token = self.converter.ids2tokens(token_int)
+                token = self.converter.ids2tokens(token_int)
 
-            if self.tokenizer is not None:
-                text = self.tokenizer.tokens2text(token)
-            else:
-                text = None
-            results.append((text, token, token_int, hyp))
+                if self.tokenizer is not None:
+                    text = self.tokenizer.tokens2text(token)
+                else:
+                    text = None
+                result.append((text, token, token_int, hyp))
+            results.append(result)
 
         return results
 
     @staticmethod
     def from_pretrained(
-        model_tag: Optional[str] = None,
-        **kwargs: Optional[Any],
+            model_tag: Optional[str] = None,
+            **kwargs: Optional[Any],
     ) -> Speech2Text:
         """Build Speech2Text instance from the pretrained model.
 
@@ -337,34 +353,35 @@ class Speech2Text:
 
 @typechecked
 def inference(
-    output_dir: str,
-    batch_size: int,
-    dtype: str,
-    beam_size: int,
-    ngpu: int,
-    seed: int,
-    lm_weight: float,
-    nbest: int,
-    num_workers: int,
-    log_level: Union[int, str],
-    data_path_and_name_and_type: Sequence[Tuple[str, str, str]],
-    asr_train_config: Optional[str],
-    asr_model_file: Optional[str],
-    beam_search_config: Optional[dict],
-    lm_train_config: Optional[str],
-    lm_file: Optional[str],
-    model_tag: Optional[str],
-    token_type: Optional[str],
-    bpemodel: Optional[str],
-    key_file: Optional[str],
-    allow_variable_data_keys: bool,
-    quantize_asr_model: Optional[bool],
-    quantize_modules: Optional[List[str]],
-    quantize_dtype: Optional[str],
-    streaming: bool,
-    decoding_window: int,
-    left_context: int,
-    display_hypotheses: bool,
+        output_dir: str,
+        batch_size: int,
+        dtype: str,
+        beam_size: int,
+        ngpu: int,
+        seed: int,
+        lm_weight: float,
+        nbest: int,
+        num_workers: int,
+        pred_num: int,
+        log_level: Union[int, str],
+        data_path_and_name_and_type: Sequence[Tuple[str, str, str]],
+        asr_train_config: Optional[str],
+        asr_model_file: Optional[str],
+        beam_search_config: Optional[dict],
+        lm_train_config: Optional[str],
+        lm_file: Optional[str],
+        model_tag: Optional[str],
+        token_type: Optional[str],
+        bpemodel: Optional[str],
+        key_file: Optional[str],
+        allow_variable_data_keys: bool,
+        quantize_asr_model: Optional[bool],
+        quantize_modules: Optional[List[str]],
+        quantize_dtype: Optional[str],
+        streaming: bool,
+        decoding_window: int,
+        left_context: int,
+        display_hypotheses: bool,
 ) -> None:
     """Transducer model inference.
 
@@ -403,8 +420,8 @@ def inference(
 
     if batch_size > 1:
         raise NotImplementedError("batch decoding is not implemented")
-    if ngpu > 1:
-        raise NotImplementedError("only single GPU decoding is supported")
+    # if ngpu > 1:
+    #     raise NotImplementedError("only single GPU decoding is supported")
 
     logging.basicConfig(
         level=log_level,
@@ -412,7 +429,7 @@ def inference(
     )
 
     if ngpu >= 1:
-        device = "cuda:0"
+        device = "cuda"
     else:
         device = "cpu"
 
@@ -421,6 +438,7 @@ def inference(
 
     # 2. Build speech2text
     speech2text_kwargs = dict(
+        pred_num=pred_num,
         asr_train_config=asr_train_config,
         asr_model_file=asr_model_file,
         beam_search_config=beam_search_config,
@@ -429,6 +447,7 @@ def inference(
         token_type=token_type,
         bpemodel=bpemodel,
         device=device,
+        ngpu=ngpu,
         dtype=dtype,
         beam_size=beam_size,
         lm_weight=lm_weight,
@@ -449,16 +468,16 @@ def inference(
         decoding_samples = speech2text.audio_processor.decoding_samples
 
     # 3. Build data-iterator
-    loader = ASRTransducerTask.build_streaming_iterator(
+    loader = ASRTransducerMTPTask.build_streaming_iterator(
         data_path_and_name_and_type,
         dtype=dtype,
         batch_size=batch_size,
         key_file=key_file,
         num_workers=num_workers,
-        preprocess_fn=ASRTransducerTask.build_preprocess_fn(
+        preprocess_fn=ASRTransducerMTPTask.build_preprocess_fn(
             speech2text.asr_train_args, False
         ),
-        collate_fn=ASRTransducerTask.build_collate_fn(
+        collate_fn=ASRTransducerMTPTask.build_collate_fn(
             speech2text.asr_train_args, False
         ),
         allow_variable_data_keys=allow_variable_data_keys,
@@ -470,7 +489,7 @@ def inference(
         for keys, batch in loader:
             assert isinstance(batch, dict), type(batch)
             assert all(isinstance(s, str) for s in keys), keys
-            
+
             _bs = len(next(iter(batch.values())))
             assert len(keys) == _bs, f"{len(keys)} != {_bs}"
             batch = {k: v[0] for k, v in batch.items() if not k.endswith("_lengths")}
@@ -487,48 +506,51 @@ def inference(
 
                         if i == decoding_steps:
                             final_hyps = speech2text.streaming_decode(
-                                speech[i * decoding_samples : len(speech)],
+                                speech[i * decoding_samples: len(speech)],
                                 is_final=True,
                             )
                         else:
                             part_hyps = speech2text.streaming_decode(
                                 speech[
-                                    (i * decoding_samples) : _start + decoding_samples
+                                (i * decoding_samples): _start + decoding_samples
                                 ],
                                 is_final=False,
                             )
 
-                            # if display_hypotheses:
-                            #     _result = speech2text.hypotheses_to_results(part_hyps)
-                            #     _length = (i + 1) * decoding_window
-
-                            #     logging.info(
-                            #         f"Current best hypothesis (0-{_length}ms): "
-                            #         f"{keys}: {_result[0][0]}"
-                            #    )
+                            if display_hypotheses:
+                                _result = speech2text.hypotheses_to_results(part_hyps)
+                                _length = (i + 1) * decoding_window
+                                print(_result[0])
+                                sys.exit(0)
+                                for i in range(pred_num):
+                                    logging.info(
+                                        f"Token{i} current best hypothesis (0-{_length}ms): "
+                                        f"{keys}: {_result[i][0][0]}"
+                                   )
                 else:
                     final_hyps = speech2text(**batch)
 
                 results = speech2text.hypotheses_to_results(final_hyps)
 
                 if display_hypotheses:
-                    logging.info(f"Final best hypothesis: {keys}: {results[0][0]} Time cost {time.time()-start_time} seconds")
+                    for i in range(pred_num):
+                        logging.info(
+                            f"Token_{i} Final best hypothesis: {keys}: {results[i][0][0]} Time cost {time.time() - start_time} seconds")
             except TooShortUttError as e:
                 logging.warning(f"Utterance {keys} {e}")
                 hyp = Hypothesis(score=0.0, yseq=[], dec_state=None)
                 results = [[" ", ["<space>"], [2], hyp]] * nbest
 
             key = keys[0]
-            for n, (text, token, token_int, hyp) in zip(range(1, nbest + 1), results):
-                ibest_writer = writer[f"{n}best_recog"]
+            for i in range(pred_num):
+                ibest_writer = writer[f"token{i}_best_recog"]
+                for text, token, token_int, hyp in results[i]:
+                    ibest_writer["token"][key] = " ".join(token)
+                    ibest_writer["token_int"][key] = " ".join(map(str, token_int))
+                    ibest_writer["score"][key] = str(hyp.score)
 
-                ibest_writer["token"][key] = " ".join(token)
-                ibest_writer["token_int"][key] = " ".join(map(str, token_int))
-                ibest_writer["score"][key] = str(hyp.score)
-
-                if text is not None:
-                    ibest_writer["text"][key] = text
-
+                    if text is not None:
+                        ibest_writer["text"][key] = text
 
 def get_parser():
     """Get Transducer model inference parser."""
@@ -602,7 +624,7 @@ def get_parser():
         "--model_tag",
         type=str,
         help="Pretrained model tag. If specify this option, *_train_config and "
-        "*_file will be overwritten",
+             "*_file will be overwritten",
     )
 
     group = parser.add_argument_group("Beam-search related")
@@ -628,14 +650,14 @@ def get_parser():
         default=None,
         choices=["char", "bpe", None],
         help="The token type for ASR model. "
-        "If not given, refers from the training args",
+             "If not given, refers from the training args",
     )
     group.add_argument(
         "--bpemodel",
         type=str_or_none,
         default=None,
         help="The model path of sentencepiece. "
-        "If not given, refers from the training args",
+             "If not given, refers from the training args",
     )
 
     group = parser.add_argument_group("Dynamic quantization related")
@@ -689,6 +711,12 @@ def get_parser():
         default=False,
         help="""Whether to display hypotheses during inference. If streaming=True,
         partial hypotheses will also be shown.""",
+    )
+    parser.add_argument(
+        "--pred_num",
+        type=int,
+        default=2,
+        help="""Num of prediction tokens.""",
     )
 
     return parser

@@ -192,7 +192,7 @@ def get_transducer_task_io(
     blank = labels[0].new([blank_id])
 
     decoder_in = pad_list(
-        [torch.cat([blank, label], dim=0) for label in labels_unpad], blank_id
+        [torch.cat([blank, label], dim=0) for label in labels_unpad], blank_id  # HZQ: Why not ignored_id?
     ).to(device)
 
     target = pad_list(labels_unpad, blank_id).type(torch.int32).to(device)

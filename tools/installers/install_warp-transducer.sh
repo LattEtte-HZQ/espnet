@@ -54,3 +54,11 @@ if ! python -c "import ninja" &> /dev/null; then
 	python3 -m pip install ninja
     )
 fi
+export CUDAROOT=/usr/local/cuda-12.1
+export LD_LIBRARY_PATH=$CUDAROOT/lib64:$CUDAROOT/extras/CUPTI/lib64:$LD_LIBRARY_PATH                                                                                    
+export LIBRARY_PATH=$CUDAROOT/lib64:$LIBRARY_PATH                                                                                                                       
+export CUDA_PATH=$CUDAROOT                                                                                                                                              
+export CUDA_HOME=$CUDAROOT                                                                                                                                              
+export CUDA_TOOLKIT_ROOT_DIR=$CUDA_HOME                                                                                                                                 
+export CFLAGS="-I$CUDAROOT/include $CFLAGS"                                                                                                                             
+export CUDABIN=$CUDAROOT/bin

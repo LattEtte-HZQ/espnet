@@ -1,0 +1,6 @@
+beam_size: 10
+lm_weight: 0.3
+streaming: True
+decoding_window: 640
+left_context: 32
+display_hypotheses: true

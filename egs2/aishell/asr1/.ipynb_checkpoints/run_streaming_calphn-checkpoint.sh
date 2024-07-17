@@ -9,8 +9,8 @@ train_set=train
 valid_set=dev
 test_sets="dev test"
 
-asr_config=conf/train_asr_streaming_RNNT.yaml
-inference_config=conf/decode_asr_streaming_RNNT.yaml
+asr_config=conf/train_asr_streaming_RNNT_mtp.yaml
+inference_config=conf/decode_asr_streaming_calphn.yaml
 
 lm_config=conf/train_lm.yaml
 use_lm=true
@@ -20,7 +20,7 @@ use_wordlm=false
 # (train_set will be "${train_set}_sp" if speed_perturb_factors is specified)
 speed_perturb_factors="0.9 1.0 1.1"
 
-./streaming_asr.sh                                               \
+./streaming_asr_calphn.sh                                               \
     --use_streaming true                               \
     --lang zh                                          \
     --audio_format wav                                 \

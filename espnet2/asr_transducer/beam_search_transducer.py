@@ -333,9 +333,9 @@ class BeamSearchTransducer:
 
                 if self.use_lm:
                     lm_scores, lm_state = self.lm.score(
-                        torch.LongTensor(
+                        torch.tensor(
                             [self.sos] + max_hyp.yseq[1:], device=self.decoder.device
-                        ),
+                        ).long(),
                         max_hyp.lm_state,
                         None,
                     )

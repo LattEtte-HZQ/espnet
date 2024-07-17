@@ -13,6 +13,7 @@ from espnet2.asr.frontend.abs_frontend import AbsFrontend
 from espnet2.asr.specaug.abs_specaug import AbsSpecAug
 from espnet2.asr_transducer.decoder.abs_decoder import AbsDecoder
 from espnet2.asr_transducer.encoder.encoder import Encoder
+from espnet2.asr_transducer.joint_network_mtp import JointNetworkMTP
 from espnet2.asr_transducer.joint_network import JointNetwork
 from espnet2.asr_transducer.utils import get_transducer_task_io
 from espnet2.layers.abs_normalize import AbsNormalize
@@ -28,7 +29,7 @@ else:
         yield
 
 
-class ESPnetASRTransducerModel(AbsESPnetModel):
+class ESPnetASRTransducerMTPModel(AbsESPnetModel):
     """ESPnet2ASRTransducerModel module definition.
 
     Args:
@@ -62,31 +63,35 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
 
     @typechecked
     def __init__(
-        self,
-        vocab_size: int,
-        token_list: Union[Tuple[str, ...], List[str]],
-        frontend: Optional[AbsFrontend],
-        specaug: Optional[AbsSpecAug],
-        normalize: Optional[AbsNormalize],
-        encoder: Encoder,
-        decoder: AbsDecoder,
-        joint_network: JointNetwork,
-        transducer_weight: float = 1.0,
-        use_k2_pruned_loss: bool = False,
-        k2_pruned_loss_args: Dict = {},
-        warmup_steps: int = 25000,
-        validation_nstep: int = 2,
-        fastemit_lambda: float = 0.0,
-        auxiliary_ctc_weight: float = 0.0,
-        auxiliary_ctc_dropout_rate: float = 0.0,
-        auxiliary_lm_loss_weight: float = 0.0,
-        auxiliary_lm_loss_smoothing: float = 0.05,
-        ignore_id: int = -1,
-        sym_space: str = "<space>",
-        sym_blank: str = "<blank>",
-        report_cer: bool = False,
-        report_wer: bool = False,
-        extract_feats_in_collect_stats: bool = True,
+            self,
+            vocab_size: int,
+            token_list: Union[Tuple[str, ...], List[str]],
+            frontend: Optional[AbsFrontend],
+            specaug: Optional[AbsSpecAug],
+            normalize: Optional[AbsNormalize],
+            encoder: Encoder,
+            decoder: AbsDecoder,
+            joint_network_mtp: JointNetworkMTP,
+            # joint_network = JointNetwork,
+            pred_num: int = 2,
+            transducer_weight: float = 1.0,
+            use_k2_pruned_loss: bool = False,
+            k2_pruned_loss_args: Dict = {},
+            warmup_steps: int = 25000,
+            validation_nstep: int = 2,
+            fastemit_lambda: float = 0.0,
+            auxiliary_mtp_loss_weight: float = 0.5,
+            auxiliary_ctc_weight: float = 0.0,
+            auxiliary_ctc_dropout_rate: float = 0.0,
+            auxiliary_lm_loss_weight: float = 0.0,
+            auxiliary_lm_loss_smoothing: float = 0.05,
+            ignore_id: int = -1,
+            blank_id: int = 0,
+            sym_space: str = "<space>",
+            sym_blank: str = "<blank>",
+            report_cer: bool = False,
+            report_wer: bool = False,
+            extract_feats_in_collect_stats: bool = True,
     ) -> None:
         """Construct an ESPnetASRTransducerModel object."""
         super().__init__()
@@ -97,6 +102,7 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         #    - vocab_size - 1: SOS/EOS symbol.
         self.vocab_size = vocab_size
         self.ignore_id = ignore_id
+        self.blank_id = blank_id
         self.token_list = token_list.copy()
 
         self.sym_space = sym_space
@@ -108,10 +114,13 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
 
         self.encoder = encoder
         self.decoder = decoder
-        self.joint_network = joint_network
+        self.joint_network_mtp = joint_network_mtp
+        # self.joint_network = joint_network
+        self.pred_num = pred_num
 
         self.criterion_transducer = None
         self.error_calculator = None
+        self.error_calculator_mtp = None
 
         self.use_auxiliary_ctc = auxiliary_ctc_weight > 0
         self.use_auxiliary_lm_loss = auxiliary_lm_loss_weight > 0
@@ -150,6 +159,7 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         self.transducer_weight = transducer_weight
         self.fastemit_lambda = fastemit_lambda
 
+        self.auxiliary_mtp_loss_weight = auxiliary_mtp_loss_weight
         self.auxiliary_ctc_weight = auxiliary_ctc_weight
         self.auxiliary_lm_loss_weight = auxiliary_lm_loss_weight
 
@@ -160,12 +170,12 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         self.extract_feats_in_collect_stats = extract_feats_in_collect_stats
 
     def forward(
-        self,
-        speech: torch.Tensor,
-        speech_lengths: torch.Tensor,
-        text: torch.Tensor,
-        text_lengths: torch.Tensor,
-        **kwargs,
+            self,
+            speech: torch.Tensor,
+            speech_lengths: torch.Tensor,
+            text: torch.Tensor,
+            text_lengths: torch.Tensor,
+            **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
         """Forward architecture and compute loss(es).
 
@@ -184,15 +194,14 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         """
         assert text_lengths.dim() == 1, text_lengths.shape
         assert (
-            speech.shape[0]
-            == speech_lengths.shape[0]
-            == text.shape[0]
-            == text_lengths.shape[0]
+                speech.shape[0]
+                == speech_lengths.shape[0]
+                == text.shape[0]
+                == text_lengths.shape[0]
         ), (speech.shape, speech_lengths.shape, text.shape, text_lengths.shape)
 
         batch_size = speech.shape[0]
         text = text[:, : text_lengths.max()]
-
         # 1. Encoder
         encoder_out, encoder_out_lens = self.encode(speech, speech_lengths)
 
@@ -205,24 +214,59 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
 
         # 3. Decoder
         self.decoder.set_device(encoder_out.device)
-        decoder_out = self.decoder(decoder_in) # (B, F=256)
+        decoder_out = self.decoder(decoder_in)  # (B, F=256)
 
         # 4. Joint Network and RNNT loss computation
+        new_target = target.clone()
+        new_u_len = u_len.clone()
         if self.use_k2_pruned_loss:
             loss_trans = self._calc_k2_transducer_pruned_loss(
                 encoder_out, decoder_out, text, t_len, u_len, **self.k2_pruned_loss_args
             )
         else:
-            joint_out = self.joint_network(
-                encoder_out.unsqueeze(2), decoder_out.unsqueeze(1)
-            )
-            loss_trans = self._calc_transducer_loss(
-                encoder_out,
-                joint_out,
-                target,
-                t_len,
-                u_len,
-            )
+            joint_outs = []
+            for i in range(self.pred_num):
+                new_decoder_out = decoder_out[:, i:, :]
+                joint_outs.append(
+                    self.joint_network_mtp.multi_token_predictor[i](
+                        encoder_out.unsqueeze(2), new_decoder_out.unsqueeze(1)
+                    )
+                )
+            # joint_outs = self.joint_network_mtp(
+            #     # (16, 88, 1, 256) (16, 1, 23, 256)
+            #     encoder_out.unsqueeze(2), decoder_out.unsqueeze(1)
+            # )
+            loss_transs = [0.0] * self.pred_num
+            loss_trans = 0.0
+            mtp_loss_weight = 1.0
+            for i in range(self.pred_num):
+                if i > 0:
+                    empty_label = torch.tensor(self.blank_id, dtype=torch.int32, device=encoder_out.device)
+                    new_target = torch.cat((target[:, 1:], empty_label.unsqueeze(0).repeat(target.size(0), 1)), dim=1)
+                    new_target = new_target[:, :-1].contiguous()
+                    mtp_loss_weight = torch.tensor(self.auxiliary_mtp_loss_weight)
+                    new_u_len = new_u_len - i
+                loss_transs[i] += mtp_loss_weight * self._calc_transducer_loss(
+                    joint_outs[i],
+                    new_target,
+                    t_len,
+                    new_u_len,
+                )
+                loss_trans += loss_transs[i]
+            if loss_trans < 0:
+                print("t_len:", t_len)
+                print("u_len:", u_len)
+                print("loss_trans:",loss_trans)
+                print("loss_transs:",loss_transs)
+                print("joint_outs[0] size:", joint_outs[0].size())
+                print("joint_outs[1] size:", joint_outs[1].size())
+                print("target:", target)
+                print("new_target:", new_target)
+                joint_outs0_cpu = joint_outs[0].cpu()
+                joint_outs1_cpu = joint_outs[1].cpu()
+                torch.save(joint_outs0_cpu, 'Bjoint_outs0_cpu.pth')
+                torch.save(joint_outs1_cpu, 'Bjoint_outs1_cpu.pth')
+                sys.exit(0)
 
         # 5. Auxiliary losses
         loss_ctc, loss_lm = 0.0, 0.0
@@ -239,9 +283,9 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
             loss_lm = self._calc_lm_loss(decoder_out, target)
 
         loss = (
-            self.transducer_weight * loss_trans
-            + self.auxiliary_ctc_weight * loss_ctc
-            + self.auxiliary_lm_loss_weight * loss_lm
+                self.transducer_weight * loss_trans
+                + self.auxiliary_ctc_weight * loss_ctc
+                + self.auxiliary_lm_loss_weight * loss_lm
         )
 
         # 6. CER/WER computation.
@@ -254,7 +298,7 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
 
                 self.error_calculator = ErrorCalculator(
                     self.decoder,
-                    self.joint_network,
+                    self.joint_network_mtp.multi_token_predictor[0],
                     self.token_list,
                     self.sym_space,
                     self.sym_blank,
@@ -262,20 +306,37 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
                     report_cer=self.report_cer,
                     report_wer=self.report_wer,
                 )
+                if self.pred_num > 1:
+                    self.error_calculator_mtp = ErrorCalculator(
+                        self.decoder,
+                        self.joint_network_mtp.multi_token_predictor[1],
+                        self.token_list,
+                        self.sym_space,
+                        self.sym_blank,
+                        nstep=self.validation_nstep,
+                        report_cer=self.report_cer,
+                        report_wer=self.report_wer,
+                    )
 
             cer_transducer, wer_transducer = self.error_calculator(
                 encoder_out, target, t_len
             )
+            cer_transducer_mtp, wer_transducer_mtp = self.error_calculator_mtp(
+                encoder_out, new_target, t_len
+            )
         else:
             cer_transducer, wer_transducer = None, None
-
+            cer_transducer_mtp, wer_transducer_mtp = None, None
         stats = dict(
             loss=loss.detach(),
             loss_transducer=loss_trans.detach(),
+            loss_transducer_mtp=loss_trans.detach()-loss_transs[0].detach(),
             loss_aux_ctc=loss_ctc.detach() if loss_ctc > 0.0 else None,
             loss_aux_lm=loss_lm.detach() if loss_lm > 0.0 else None,
             cer_transducer=cer_transducer,
             wer_transducer=wer_transducer,
+            cer_transducer_mtp=cer_transducer_mtp,
+            wer_transducer_mtp=wer_transducer_mtp,
         )
 
         # force_gatherable: to-device and to-tensor if scalar for DataParallel
@@ -284,12 +345,12 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         return loss, stats, weight
 
     def collect_feats(
-        self,
-        speech: torch.Tensor,
-        speech_lengths: torch.Tensor,
-        text: torch.Tensor,
-        text_lengths: torch.Tensor,
-        **kwargs,
+            self,
+            speech: torch.Tensor,
+            speech_lengths: torch.Tensor,
+            text: torch.Tensor,
+            text_lengths: torch.Tensor,
+            **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """Collect features sequences and features lengths sequences.
 
@@ -320,9 +381,9 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         return {"feats": feats, "feats_lengths": feats_lengths}
 
     def encode(
-        self,
-        speech: torch.Tensor,
-        speech_lengths: torch.Tensor,
+            self,
+            speech: torch.Tensor,
+            speech_lengths: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encoder speech sequences.
 
@@ -362,7 +423,7 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         return encoder_out, encoder_out_lens
 
     def _extract_feats(
-        self, speech: torch.Tensor, speech_lengths: torch.Tensor
+            self, speech: torch.Tensor, speech_lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Extract features sequences and features sequences lengths.
 
@@ -388,17 +449,15 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         return feats, feats_lengths
 
     def _calc_transducer_loss(
-        self,
-        encoder_out: torch.Tensor,
-        joint_out: torch.Tensor,
-        target: torch.Tensor,
-        t_len: torch.Tensor,
-        u_len: torch.Tensor,
+            self,
+            joint_out: torch.Tensor,
+            target: torch.Tensor,
+            t_len: torch.Tensor,
+            u_len: torch.Tensor,
     ) -> torch.Tensor:
         """Compute Transducer loss.
 
         Args:
-            encoder_out: Encoder output sequences. (B, T, D_enc)
             joint_out: Joint Network output sequences (B, T, U, D_joint)
             target: Target label ID sequences. (B, L)
             t_len: Encoder output sequences lengths. (B,)
@@ -410,15 +469,15 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         """
         if self.criterion_transducer is None:
             try:
-                from warprnnt_pytorch import RNNTLoss
+                from torchaudio.transforms import RNNTLoss
 
                 self.criterion_transducer = RNNTLoss(
                     reduction="mean",
-                    fastemit_lambda=self.fastemit_lambda,
+                    blank=0
                 )
             except ImportError:
                 logging.error(
-                    "warp-transducer was not installed. "
+                    "torchaudio.transforms was not installed. "
                     "Please consult the installation documentation."
                 )
                 exit(1)
@@ -434,19 +493,19 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         return loss_transducer
 
     def _calc_k2_transducer_pruned_loss(
-        self,
-        encoder_out: torch.Tensor,
-        decoder_out: torch.Tensor,
-        labels: torch.Tensor,
-        encoder_out_len: torch.Tensor,
-        decoder_out_len: torch.Tensor,
-        prune_range: int = 5,
-        simple_loss_scaling: float = 0.5,
-        lm_scale: float = 0.0,
-        am_scale: float = 0.0,
-        loss_type: str = "regular",
-        reduction: str = "mean",
-        padding_idx: int = 0,
+            self,
+            encoder_out: torch.Tensor,
+            decoder_out: torch.Tensor,
+            labels: torch.Tensor,
+            encoder_out_len: torch.Tensor,
+            decoder_out_len: torch.Tensor,
+            prune_range: int = 5,
+            simple_loss_scaling: float = 0.5,
+            lm_scale: float = 0.0,
+            am_scale: float = 0.0,
+            loss_type: str = "regular",
+            reduction: str = "mean",
+            padding_idx: int = 0,
     ) -> torch.Tensor:
         """Compute k2 pruned Transducer loss.
 
@@ -489,7 +548,7 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         if self.steps_num < self.warmup_steps:
             pruned_loss_scaling = 0.1 + 0.9 * (self.steps_num / self.warmup_steps)
             simple_loss_scaling = 1.0 - (
-                (self.steps_num / self.warmup_steps) * (1.0 - simple_loss_scaling)
+                    (self.steps_num / self.warmup_steps) * (1.0 - simple_loss_scaling)
             )
         else:
             pruned_loss_scaling = 1.0
@@ -533,12 +592,12 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         )
 
         am_pruned, lm_pruned = k2.do_rnnt_pruning(
-            self.joint_network.lin_enc(encoder_out),
-            self.joint_network.lin_dec(decoder_out),
+            self.joint_network_mtp.multi_token_predictor[0].lin_enc(encoder_out),
+            self.joint_network_mtp.multi_token_predictor[0].lin_dec(decoder_out),
             ranges,
         )
 
-        joint_out = self.joint_network(am_pruned, lm_pruned, no_projection=True)
+        joint_out = self.joint_network_mtp.multi_token_predictor[0](am_pruned, lm_pruned, no_projection=True)
 
         with autocast(False):
             pruned_loss = k2.rnnt_loss_pruned(
@@ -552,17 +611,17 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
             )
 
         loss_transducer = (
-            simple_loss_scaling * simple_loss + pruned_loss_scaling * pruned_loss
+                simple_loss_scaling * simple_loss + pruned_loss_scaling * pruned_loss
         )
 
         return loss_transducer
 
     def _calc_ctc_loss(
-        self,
-        encoder_out: torch.Tensor,
-        target: torch.Tensor,
-        t_len: torch.Tensor,
-        u_len: torch.Tensor,
+            self,
+            encoder_out: torch.Tensor,
+            target: torch.Tensor,
+            t_len: torch.Tensor,
+            u_len: torch.Tensor,
     ) -> torch.Tensor:
         """Compute CTC loss.
 
@@ -598,9 +657,9 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         return loss_ctc
 
     def _calc_lm_loss(
-        self,
-        decoder_out: torch.Tensor,
-        target: torch.Tensor,
+            self,
+            decoder_out: torch.Tensor,
+            target: torch.Tensor,
     ) -> torch.Tensor:
         """Compute LM loss (i.e.: Cross-entropy with smoothing).
 

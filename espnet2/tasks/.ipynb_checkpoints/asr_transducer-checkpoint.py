@@ -245,7 +245,7 @@ class ASRTransducerTask(AbsTask):
     @classmethod
     @typechecked
     def build_preprocess_fn(
-            cls, args: argparse.Namespace, train: bool
+        cls, args: argparse.Namespace, train: bool
     ) -> Optional[Callable[[str, Dict[str, np.array]], Dict[str, np.ndarray]]]:
         """Build pre-processing function.
 
@@ -290,7 +290,7 @@ class ASRTransducerTask(AbsTask):
 
     @classmethod
     def required_data_names(
-            cls, train: bool = True, inference: bool = False
+        cls, train: bool = True, inference: bool = False
     ) -> Tuple[str, ...]:
         """Required data depending on task mode.
 
@@ -312,7 +312,7 @@ class ASRTransducerTask(AbsTask):
 
     @classmethod
     def optional_data_names(
-            cls, train: bool = True, inference: bool = False
+        cls, train: bool = True, inference: bool = False
     ) -> Tuple[str, ...]:
         """Optional data depending on task mode.
 
@@ -360,7 +360,7 @@ class ASRTransducerTask(AbsTask):
                 "warmup_steps", 25000
             )
 
-        logging.info(f"Vocabulary size: {vocab_size}")
+        logging.info(f"Vocabulary size: {vocab_size }")
 
         # 1. frontend
         if args.input_size is None:
@@ -402,9 +402,9 @@ class ASRTransducerTask(AbsTask):
 
         # 6. Joint Network
         joint_network = JointNetwork(
-            output_size=vocab_size,
-            encoder_size=encoder_output_size,
-            decoder_size=decoder_output_size,
+            vocab_size,
+            encoder_output_size,
+            decoder_output_size,
             **args.joint_network_conf,
         )
 

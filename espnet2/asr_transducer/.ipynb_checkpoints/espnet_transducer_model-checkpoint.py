@@ -1,7 +1,6 @@
 """ESPnet2 ASR Transducer model."""
 
 import logging
-import sys
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -13,6 +12,8 @@ from espnet2.asr.frontend.abs_frontend import AbsFrontend
 from espnet2.asr.specaug.abs_specaug import AbsSpecAug
 from espnet2.asr_transducer.decoder.abs_decoder import AbsDecoder
 from espnet2.asr_transducer.encoder.encoder import Encoder
+# from espnet2.asr_transducer.predictor.predictor import Predictor
+# from espnet2.asr_transducer.acoustic_model.acoustic_model import Acoustic_model
 from espnet2.asr_transducer.joint_network import JointNetwork
 from espnet2.asr_transducer.utils import get_transducer_task_io
 from espnet2.layers.abs_normalize import AbsNormalize
@@ -69,7 +70,9 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         specaug: Optional[AbsSpecAug],
         normalize: Optional[AbsNormalize],
         encoder: Encoder,
+        # acoustic_model: Acoustic_model,
         decoder: AbsDecoder,
+        # predictor: Predictor,
         joint_network: JointNetwork,
         transducer_weight: float = 1.0,
         use_k2_pruned_loss: bool = False,
@@ -107,8 +110,10 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         self.normalize = normalize
 
         self.encoder = encoder
+        # self.acoustic_model = acoustic_model
         self.decoder = decoder
         self.joint_network = joint_network
+        # self.predictor = predictor
 
         self.criterion_transducer = None
         self.error_calculator = None
@@ -196,6 +201,10 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         # 1. Encoder
         encoder_out, encoder_out_lens = self.encode(speech, speech_lengths)
 
+        # 1.1 Acoustic model
+        # self.acoustic_model.set_device(encoder_out.device)
+        # phoneme = self.acoustic_model(encoder_out)
+
         # 2. Transducer-related I/O preparation
         decoder_in, target, t_len, u_len = get_transducer_task_io(
             text,
@@ -207,6 +216,10 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
         self.decoder.set_device(encoder_out.device)
         decoder_out = self.decoder(decoder_in) # (B, F=256)
 
+        # 3.1 Predictor
+        # simulated_context = self.predictor(decoder_out, phoneme)
+        # simu_loss = torch.nn.L1Loss(reduction='mean')(simulated_context, shift_x)
+
         # 4. Joint Network and RNNT loss computation
         if self.use_k2_pruned_loss:
             loss_trans = self._calc_k2_transducer_pruned_loss(
@@ -216,6 +229,7 @@ class ESPnetASRTransducerModel(AbsESPnetModel):
             joint_out = self.joint_network(
                 encoder_out.unsqueeze(2), decoder_out.unsqueeze(1)
             )
+
             loss_trans = self._calc_transducer_loss(
                 encoder_out,
                 joint_out,

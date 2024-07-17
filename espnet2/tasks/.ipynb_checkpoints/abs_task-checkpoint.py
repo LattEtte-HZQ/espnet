@@ -1,7 +1,6 @@
 """Abstract task module."""
 
 import argparse
-import collections
 import functools
 import logging
 import os
@@ -2064,7 +2063,6 @@ class AbsTask(ABC):
         config_file: Optional[Union[Path, str]] = None,
         model_file: Optional[Union[Path, str]] = None,
         device: str = "cpu",
-        ngpu: int = 0,
     ) -> Tuple[AbsESPnetModel, argparse.Namespace]:
         """Build model from the files.
 
@@ -2095,9 +2093,6 @@ class AbsTask(ABC):
                 f"model must inherit {AbsESPnetModel.__name__}, but got {type(model)}"
             )
         model.to(device)
-        # # 20240703 HZQ Multi GPUs Inference
-        # if ngpu > 1:
-        #     model = torch.nn.DataParallel(model)
 
         # For finetuned model, create adapter
         use_adapter = getattr(args, "use_adapter", False)
@@ -2110,14 +2105,9 @@ class AbsTask(ABC):
                 #   in PyTorch<=1.4
                 device = f"cuda:{torch.cuda.current_device()}"
             try:
-                # 20240703 HZQ Multi GPUs Inference
-                state_dict = torch.load(model_file, map_location=device)
-                strict = not use_adapter
-                # if ngpu > 1:
-                #     strict = False
                 model.load_state_dict(
-                    state_dict,
-                    strict=strict,
+                    torch.load(model_file, map_location=device),
+                    strict=not use_adapter,
                 )
             except RuntimeError:
                 # Note(simpleoier): the following part is to be compatible with

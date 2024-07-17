@@ -53,15 +53,13 @@ class JointNetwork(torch.nn.Module):
         Args:
             enc_out: Expanded encoder output state sequences.
                          (B, T, s_range, D_enc) or (B, T, 1, D_enc)
-                         (16, 88, 1, 256)
             dec_out: Expanded decoder output state sequences.
                          (B, T, s_range, D_dec) or (B, 1, U, D_dec)
-                         (16, 1, 23, 256)
 
         Returns:
             joint_out: Joint output state sequences.
                            (B, T, U, D_out) or (B, T, s_range, D_out)
-                            (16, 88, 23, 183)
+
         """
         if no_projection:
             joint_out = self.joint_activation(enc_out + dec_out)
